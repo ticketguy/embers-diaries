@@ -1,0 +1,132 @@
+"""
+Ember's Diaries — Write-Ahead Log (WAL)
+Guarantees crash safety. Before any record is written to the store,
+it is logged here first. On startup, incomplete writes are recovered.
+
+Protocol:
+  1. Write WAL entry (PENDING)
+  2. Write record to store
+  3. Mark WAL entry COMMITTED
+  4. On crash recovery: any PENDING entries are replayed
+"""
+
+import os
+import threading
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+from ..storage.format import encode_index, decode_index
+
+
+_WAL_FILENAME = "wal.jsonl"
+
+
+class WALEntry:
+    def __init__(self, operation: str, record_id: str, data: dict):
+        self.wal_id    = str(uuid.uuid4())
+        self.operation = operation   # "write" | "deprecate" | "annotate"
+        self.record_id = record_id
+        self.data      = data
+        self.status    = "PENDING"   # PENDING | COMMITTED
+        self.timestamp = datetime.utcnow().isoformat()
+
+    def to_dict(self) -> dict:
+        return {
+            "wal_id":    self.wal_id,
+            "operation": self.operation,
+            "record_id": self.record_id,
+            "data":      self.data,
+            "status":    self.status,
+            "timestamp": self.timestamp,
+        }
+
+
+class WriteAheadLog:
+    """
+    Append-only WAL file. One JSON line per entry.
+    Thread-safe via lock.
+    """
+
+    def __init__(self, store_path: Path):
+        self.path = store_path / _WAL_FILENAME
+        self._lock = threading.Lock()
+        self._ensure_file()
+
+    def _ensure_file(self):
+        if not self.path.exists():
+            self.path.touch()
+
+    def log(self, operation: str, record_id: str, data: dict) -> WALEntry:
+        """Write a PENDING entry to the WAL. Returns the entry."""
+        entry = WALEntry(operation, record_id, data)
+        with self._lock:
+            with open(self.path, "ab") as f:
+                line = encode_index(entry.to_dict()) + b"\n"
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+        return entry
+
+    def commit(self, wal_id: str):
+        """
+        Mark a WAL entry as COMMITTED.
+        We do this by appending a commit marker — the WAL is never modified.
+        """
+        commit_marker = {"wal_id": wal_id, "status": "COMMITTED",
+                         "timestamp": datetime.utcnow().isoformat()}
+        with self._lock:
+            with open(self.path, "ab") as f:
+                line = encode_index(commit_marker) + b"\n"
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+
+    def recover(self) -> list[dict]:
+        """
+        On startup: scan WAL for PENDING entries with no COMMIT marker.
+        Returns list of entries that need to be replayed.
+        """
+        if not self.path.exists():
+            return []
+
+        entries: dict[str, dict] = {}
+        committed: set[str] = set()
+
+        with open(self.path, "rb") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = decode_index(line)
+                    wal_id = entry.get("wal_id", "")
+                    if entry.get("status") == "COMMITTED":
+                        committed.add(wal_id)
+                    elif entry.get("status") == "PENDING":
+                        entries[wal_id] = entry
+                except Exception:
+                    continue
+
+        # Return entries that were never committed
+        pending = [e for wid, e in entries.items() if wid not in committed]
+        return pending
+
+    def checkpoint(self):
+        """
+        Compact the WAL by removing all committed entries.
+        Only keeps entries that are still PENDING (should be none in normal operation).
+        Safe to call periodically.
+        """
+        pending = self.recover()
+        with self._lock:
+            # Rewrite WAL with only pending entries
+            with open(self.path, "wb") as f:
+                for entry in pending:
+                    line = encode_index(entry) + b"\n"
+                    f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+
+    def size_bytes(self) -> int:
+        return self.path.stat().st_size if self.path.exists() else 0
