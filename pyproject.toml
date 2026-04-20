@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "embers-diaries"
+version = "0.1.0"
+description = "Ember's Diaries: A cognitive database engine for AI memory systems"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Sammie", github = "ticketguy"}]
+
+dependencies = [
+    # msgpack for fast binary serialization — falls back to json if missing
+    "msgpack>=1.0.0",
+]
+
+[project.optional-dependencies]
+# Vector similarity search
+vector = ["numpy>=1.24.0"]
+
+# Full-text search
+fulltext = ["whoosh>=2.7.4"]
+
+# REST API server
+api = ["fastapi>=0.100.0", "uvicorn>=0.20.0"]
+
+# Everything
+all = ["msgpack>=1.0.0", "numpy>=1.24.0", "whoosh>=2.7.4",
+       "fastapi>=0.100.0", "uvicorn>=0.20.0"]
+
+# Dev/testing
+dev = ["pytest>=7.0.0", "pytest-cov"]
+
+[tool.setuptools.packages.find]
+include = ["embers*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
