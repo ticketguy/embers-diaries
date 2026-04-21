@@ -94,10 +94,19 @@ class EmberRecord:
         if self.deprecated:
             return False
         now = datetime.now(timezone.utc)
-        if self.valid_from and now < self.valid_from:
-            return False
-        if self.valid_until and now > self.valid_until:
-            return False
+        if self.valid_from:
+            vf = self.valid_from
+            # Normalize: if stored datetime is naive, treat as UTC
+            if vf.tzinfo is None:
+                vf = vf.replace(tzinfo=timezone.utc)
+            if now < vf:
+                return False
+        if self.valid_until:
+            vu = self.valid_until
+            if vu.tzinfo is None:
+                vu = vu.replace(tzinfo=timezone.utc)
+            if now > vu:
+                return False
         return True
 
     @property
