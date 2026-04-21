@@ -5,7 +5,7 @@ Enforces append-only semantics — nothing is ever destroyed.
 """
 
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..core.record import EmberRecord
 from ..core.annotation import Annotation
@@ -116,7 +116,7 @@ class WriteEngine:
         sidecar.write_bytes(encode_index({
             "old_id":    old_id,
             "new_id":    new_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }))
 
     def get_superseded_by(self, record_id: str) -> str | None:
@@ -159,8 +159,8 @@ class WriteEngine:
             record = self._store.read(record_id)
             if record is None:
                 raise KeyError(f"Record {record_id} not found.")
-            if record.deprecated:
-                return False  # Already deprecated
+            if self.is_deprecated(record_id):
+                return False  # Already deprecated — check sidecar, not the immutable record
 
             # Write deprecation sidecar — never modify the original
             dep_dir = self._store.root / "deprecations"
@@ -172,7 +172,7 @@ class WriteEngine:
                 "reason":     reason.value,
                 "note":       note,
                 "written_by": written_by,
-                "timestamp":  datetime.utcnow().isoformat(),
+                "timestamp":  datetime.now(timezone.utc).isoformat(),
             }))
 
             self._notify(record, "deprecate")

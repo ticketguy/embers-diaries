@@ -1,0 +1,19 @@
+# Ember's Diaries — pinned requirements
+# Install: pip install -r requirements.txt
+
+# ── Core (required) ──────────────────────────────────────────────────────────
+msgpack>=1.0.8,<2.0.0          # Binary serialization (falls back to JSON if missing)
+
+# ── Phase 2: Index layer ──────────────────────────────────────────────────────
+numpy>=1.26.0,<3.0.0           # Vector index support
+
+# ── Phase 3: Full-text search ─────────────────────────────────────────────────
+# whoosh>=2.7.4                 # Uncomment when Phase 3 is built
+
+# ── Phase 6: REST API ────────────────────────────────────────────────────────
+# fastapi>=0.110.0,<1.0.0      # Uncomment when Phase 6 is built
+# uvicorn>=0.29.0,<1.0.0       # Uncomment when Phase 6 is built
+
+# ── Dev / Testing ─────────────────────────────────────────────────────────────
+pytest>=7.4.0,<9.0.0
+pytest-cov>=4.1.0

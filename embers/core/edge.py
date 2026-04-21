@@ -4,7 +4,7 @@ Graph connection schema between records.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from .types import EdgeType
 
@@ -36,7 +36,7 @@ class EdgeRef:
 
     def is_active(self) -> bool:
         """Check if this edge is currently valid."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if self.valid_from and now < self.valid_from:
             return False
         if self.valid_until and now > self.valid_until:

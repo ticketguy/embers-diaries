@@ -12,7 +12,7 @@ Directory layout:
 
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..storage.format import encode, decode
@@ -47,7 +47,7 @@ class PhysicalStore:
         if not meta_file.exists():
             self._write_meta({
                 "version":    "1.0",
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "engine":     "ember_diaries",
                 "record_count": 0,
             })
@@ -154,7 +154,7 @@ class PhysicalStore:
     def _increment_record_count(self):
         meta = self._read_meta()
         meta["record_count"] = meta.get("record_count", 0) + 1
-        meta["last_write"] = datetime.utcnow().isoformat()
+        meta["last_write"] = datetime.now(timezone.utc).isoformat()
         self._write_meta(meta)
 
     def stats(self) -> dict:
