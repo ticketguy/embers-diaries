@@ -6,7 +6,7 @@ Records are permanent. They are never modified after creation.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 import uuid
 
@@ -93,7 +93,7 @@ class EmberRecord:
         """True if not deprecated and within valid time window."""
         if self.deprecated:
             return False
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if self.valid_from and now < self.valid_from:
             return False
         if self.valid_until and now > self.valid_until:
@@ -106,7 +106,7 @@ class EmberRecord:
         return self.is_current and not self.deprecated
 
     def age_seconds(self) -> float:
-        return (datetime.utcnow() - self.created_at).total_seconds()
+        return (datetime.now(timezone.utc) - self.created_at).total_seconds()
 
     # ── Serialization ─────────────────────────────────────────────────────────
 

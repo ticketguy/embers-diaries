@@ -162,10 +162,10 @@ class EmberDB:
 
     # ── Graph (Phase 2 stubs) ─────────────────────────────────────────────────
 
-    def connect(self, from_id: str, to_id: str,
-                edge_ref: EdgeRef | None = None) -> bool:
+    def link(self, from_id: str, to_id: str,
+             edge_ref: EdgeRef | None = None) -> bool:
         """
-        Connect two records. Stores connection metadata.
+        Link two records with a graph edge.
         Full graph traversal in Phase 2.
         """
         # For now: store as annotations on both records

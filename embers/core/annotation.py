@@ -5,7 +5,7 @@ Original records are NEVER touched.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 

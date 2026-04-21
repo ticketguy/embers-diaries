@@ -13,7 +13,7 @@ Protocol:
 import os
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..storage.format import encode_index, decode_index
@@ -29,7 +29,7 @@ class WALEntry:
         self.record_id = record_id
         self.data      = data
         self.status    = "PENDING"   # PENDING | COMMITTED
-        self.timestamp = datetime.utcnow().isoformat()
+        self.timestamp = datetime.now(timezone.utc).isoformat()
 
     def to_dict(self) -> dict:
         return {
@@ -74,7 +74,7 @@ class WriteAheadLog:
         We do this by appending a commit marker — the WAL is never modified.
         """
         commit_marker = {"wal_id": wal_id, "status": "COMMITTED",
-                         "timestamp": datetime.utcnow().isoformat()}
+                         "timestamp": datetime.now(timezone.utc).isoformat()}
         with self._lock:
             with open(self.path, "ab") as f:
                 line = encode_index(commit_marker) + b"\n"
