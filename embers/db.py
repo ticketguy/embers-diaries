@@ -280,11 +280,36 @@ class EmberDB:
     # ── Namespaces ────────────────────────────────────────────────────────────
 
     def create_namespace(self, name: str, description: str = "",
-                         access_level: AccessLevel = AccessLevel.PRIVATE):
-        return self._ns_manager.create(name, description, access_level)
+                         access_level: AccessLevel = AccessLevel.PRIVATE,
+                         owner: str = "system"):
+        """Create a namespace with access control."""
+        return self._ns_manager.create(name, description, access_level, owner)
 
     def list_namespaces(self):
         return self._ns_manager.list_all()
+
+    def check_namespace_access(self, namespace: str, caller: str,
+                                operation: str = "read") -> bool:
+        """Check if caller has access. operation: 'read' or 'write'."""
+        if operation == "write":
+            return self._ns_manager.check_write(namespace, caller)
+        return self._ns_manager.check_read(namespace, caller)
+
+    def grant_namespace_access(self, namespace: str, caller: str,
+                                level: str = "read"):
+        """Grant access to a caller. level: 'read' or 'write'."""
+        if level == "write":
+            self._ns_manager.grant_write(namespace, caller)
+        else:
+            self._ns_manager.grant_read(namespace, caller)
+
+    def revoke_namespace_access(self, namespace: str, caller: str,
+                                 level: str = "read"):
+        """Revoke access from a caller. level: 'read' or 'write'."""
+        if level == "write":
+            self._ns_manager.revoke_write(namespace, caller)
+        else:
+            self._ns_manager.revoke_read(namespace, caller)
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
