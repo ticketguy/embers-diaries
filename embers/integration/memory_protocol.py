@@ -1,0 +1,342 @@
+"""
+Ember's Diaries — Memory Protocol
+The unified interface that LLMs use to interact with Ember's Diaries.
+
+This is the "imbued" layer — the bridge between the cognitive database
+and the language model. It provides:
+
+1. remember(text) → store a new memory with auto-embedding
+2. recall(query) → retrieve relevant memories as LLM context
+3. reflect() → trigger cognitive processing (decay, conflicts, consolidation)
+4. forget(id) → deprecate a memory (never delete)
+5. update(id, new_data) → supersede a memory (never overwrite)
+
+The protocol is model-agnostic. Any LLM can use it.
+"""
+
+from datetime import datetime, timezone
+from typing import Any, Callable
+
+from ..core.record import EmberRecord
+from ..core.annotation import Annotation, ReflectiveAnnotation
+from ..core.types import RecordType, MemoryType, VerifyStatus
+from ..cognitive.decay import DecayEngine
+from ..cognitive.conflict import ConflictDetector
+from ..cognitive.consolidation import ConsolidationEngine
+from ..cognitive.episodic import EpisodicSegmenter
+from ..cognitive.reflection import ReflectionEngine
+from .context import ContextBuilder
+from .embeddings import EmbeddingPipeline
+
+
+class MemoryProtocol:
+    """
+    The single interface for LLM ↔ Ember's Diaries communication.
+    
+    This is what gets wired into the model. When an LLM needs to:
+    - Store something it learned → protocol.remember()
+    - Retrieve relevant context → protocol.recall()
+    - Verify a fact → protocol.verify()
+    - Process its memories → protocol.reflect()
+    
+    The protocol handles embedding, indexing, retrieval, decay,
+    conflict detection, and context formatting automatically.
+    """
+
+    def __init__(self, db,  # EmberDB instance
+                 embed_fn: Callable | None = None,
+                 embedding_dimension: int = 256,
+                 default_namespace: str = "memories",
+                 max_context_tokens: int = 4096):
+        self.db = db
+        self.namespace = default_namespace
+
+        # Cognitive components
+        self.decay = DecayEngine()
+        self.conflicts = ConflictDetector()
+        self.consolidation = ConsolidationEngine()
+        self.segmenter = EpisodicSegmenter()
+        self.reflection = ReflectionEngine(self.decay, self.conflicts)
+
+        # Integration components
+        self.embeddings = EmbeddingPipeline(embed_fn, embedding_dimension)
+        self.context_builder = ContextBuilder(self.decay, max_context_tokens)
+
+        # Internal state
+        self._write_count = 0
+
+    # ── Core Memory Operations ────────────────────────────────────────────────
+
+    def remember(self, content: Any,
+                 tags: list[str] | None = None,
+                 confidence: float = 1.0,
+                 decay_rate: float = 0.01,
+                 written_by: str = "llm",
+                 memory_type: str = "episodic",
+                 verify_status: str = "hypothesis",
+                 namespace: str | None = None) -> str:
+        """
+        Store a new memory. Auto-generates embedding and checks for conflicts.
+        Returns the record ID.
+        """
+        ns = namespace or self.namespace
+
+        # Build record
+        data = content if isinstance(content, dict) else {"content": str(content)}
+        if "memory_type" not in data:
+            data["memory_type"] = memory_type
+        if "verify_status" not in data:
+            data["verify_status"] = verify_status
+
+        record = EmberRecord(
+            namespace=ns,
+            record_type=RecordType.DOCUMENT,
+            data=data,
+            tags=tags or [],
+            confidence=confidence,
+            decay_rate=decay_rate,
+            written_by=written_by,
+        )
+
+        # Generate embedding
+        embedding = self.embeddings.embed_record(record)
+        record.embedding = embedding
+
+        # Write to store
+        record_id = self.db.write(record)
+
+        # Index in vector store
+        if hasattr(self.db, '_vector_index'):
+            self.db._vector_index.add(record_id, embedding, ns)
+
+        # Index in full-text
+        if hasattr(self.db, '_fulltext_index'):
+            self.db._fulltext_index.add(record_id, record.data, ns,
+                                         extra_text=" ".join(record.tags))
+
+        # Index in timeline
+        if hasattr(self.db, '_timeline_index'):
+            self.db._timeline_index.add(record_id, ns,
+                                         record.created_at.isoformat())
+
+        # Index in master
+        if hasattr(self.db, '_master_index'):
+            self.db._master_index.index_record(
+                record_id, ns, record.record_type.value,
+                record.created_at.isoformat(), record.tags,
+                written_by=written_by)
+
+        # Conflict check (lazy — check against recent records in same namespace)
+        self._check_conflicts(record)
+
+        self._write_count += 1
+        return record_id
+
+    def recall(self, query: str,
+               top_k: int = 10,
+               namespace: str | None = None,
+               threshold: float = 0.0,
+               include_annotations: bool = True,
+               format: str = "text") -> str | list[dict]:
+        """
+        Retrieve relevant memories for a query.
+        
+        Args:
+            query: Natural language query
+            top_k: Maximum memories to return
+            namespace: Namespace filter
+            threshold: Minimum similarity threshold
+            format: 'text' (for prompt injection), 'messages' (for chat),
+                    'structured' (for function calling), 'raw' (EmberRecord list)
+        
+        Returns formatted context ready for LLM consumption.
+        """
+        ns = namespace or self.namespace
+
+        # Embed the query
+        query_embedding = self.embeddings.embed_text(query)
+
+        # Vector similarity search
+        records = []
+        if hasattr(self.db, '_vector_index'):
+            results = self.db._vector_index.similar(
+                query_embedding, ns, top_k * 2, threshold)
+            for rid, score in results:
+                r = self.db.get(rid, include_deprecated=False)
+                if r is not None:
+                    records.append(r)
+        else:
+            # Fallback: full-text search
+            if hasattr(self.db, '_fulltext_index'):
+                results = self.db._fulltext_index.search(query, ns, top_k)
+                for rid, score in results:
+                    r = self.db.get(rid)
+                    if r:
+                        records.append(r)
+
+        # Also do full-text search and merge
+        if hasattr(self.db, '_fulltext_index'):
+            text_results = self.db._fulltext_index.search(query, ns, top_k)
+            seen_ids = {r.id for r in records}
+            for rid, score in text_results:
+                if rid not in seen_ids:
+                    r = self.db.get(rid)
+                    if r:
+                        records.append(r)
+
+        # Limit
+        records = records[:top_k]
+
+        # Track access (via annotation for immutability)
+        for r in records:
+            r.access_count += 1
+            r.last_accessed = datetime.now(timezone.utc)
+
+        # Format output
+        if format == "raw":
+            return records
+        elif format == "messages":
+            return self.context_builder.build_message_context(records)
+        elif format == "structured":
+            return self.context_builder.build_structured_context(records)
+        else:
+            return self.context_builder.build_text_context(
+                records, include_annotations=include_annotations)
+
+    def verify(self, record_id: str,
+               status: str = "verified",
+               note: str = "",
+               written_by: str = "llm") -> bool:
+        """
+        Update the epistemic status of a memory.
+        Creates a verification annotation (never modifies the original).
+        """
+        valid_statuses = {"verified", "hypothesis", "contested", "deprecated"}
+        if status not in valid_statuses:
+            raise ValueError(f"Invalid status: {status}. Must be one of {valid_statuses}")
+
+        ann = Annotation(
+            content=f"Verification status updated to: {status}. {note}",
+            context="verification",
+            annotation_type="validation",
+            written_by=written_by,
+            tags=["verification", status],
+        )
+        self.db.annotate(record_id, ann)
+        return True
+
+    def update(self, record_id: str, new_content: Any,
+               written_by: str = "llm") -> tuple[str, str]:
+        """
+        Update a memory (creates new version, preserves old).
+        Returns (new_id, old_id).
+        """
+        data = new_content if isinstance(new_content, dict) else {"content": str(new_content)}
+        return self.db.update(record_id, data, written_by)
+
+    def forget(self, record_id: str, reason: str = "",
+               written_by: str = "llm") -> bool:
+        """
+        Deprecate a memory (never delete). Returns True if successful.
+        """
+        from ..core.types import DeprecationReason
+        return self.db.deprecate(record_id, DeprecationReason.MANUAL,
+                                  reason, written_by)
+
+    # ── Cognitive Operations ──────────────────────────────────────────────────
+
+    def reflect(self, namespace: str | None = None,
+                limit: int = 50) -> list[ReflectiveAnnotation]:
+        """
+        Run a reflection cycle. Examines memories for:
+        - Confidence decay
+        - Unresolved conflicts
+        - Consolidation opportunities
+        
+        Returns generated reflective annotations.
+        """
+        ns = namespace or self.namespace
+        records = self.db.get_namespace(ns, include_deprecated=False, limit=limit)
+
+        # Run reflection
+        annotations = self.reflection.reflect(records, context="scheduled_reflection")
+
+        # Write annotations to store
+        for ann in annotations:
+            if ann.target_record_id:
+                try:
+                    self.db.annotate(ann.target_record_id, ann)
+                except Exception:
+                    pass
+
+        return annotations
+
+    def consolidate(self, namespace: str | None = None) -> list[str]:
+        """
+        Run memory consolidation. Finds groups of related memories
+        and creates consolidated long-term records.
+        Returns IDs of newly created consolidated records.
+        """
+        ns = namespace or self.namespace
+        records = self.db.get_namespace(ns, include_deprecated=False)
+
+        # Find consolidation candidates
+        groups = self.consolidation.find_consolidation_candidates(records)
+
+        new_ids = []
+        for group in groups:
+            consolidated = self.consolidation.create_consolidation_record(group)
+            try:
+                rid = self.db.write(consolidated)
+                new_ids.append(rid)
+            except Exception:
+                pass
+
+        return new_ids
+
+    def segment_episodes(self, namespace: str | None = None) -> list[dict]:
+        """
+        Segment records into episodic events.
+        Returns list of episode dicts.
+        """
+        ns = namespace or self.namespace
+        records = self.db.get_namespace(ns, include_deprecated=False)
+        episodes = self.segmenter.segment(records)
+        return [ep.to_dict() for ep in episodes]
+
+    # ── Conflict Management ───────────────────────────────────────────────────
+
+    def _check_conflicts(self, new_record: EmberRecord):
+        """Check new record against existing records for conflicts."""
+        ns = new_record.namespace
+        try:
+            existing = self.db.get_namespace(ns, limit=20)
+            conflicts = self.conflicts.detect_value_conflict(new_record, existing)
+            for conflict in conflicts:
+                annotations = self.conflicts.create_conflict_annotations(conflict)
+                for ann in annotations:
+                    try:
+                        self.db.annotate(ann.target_record_id, ann)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def get_unresolved_conflicts(self) -> list[dict]:
+        """Get all unresolved conflicts."""
+        return [c.to_dict() for c in self.conflicts.get_unresolved()]
+
+    # ── Stats ─────────────────────────────────────────────────────────────────
+
+    def stats(self) -> dict:
+        return {
+            "memories_written": self._write_count,
+            "db_stats": self.db.stats(),
+            "conflicts": self.conflicts.stats(),
+            "episodes": self.segmenter.stats(),
+            "embeddings": {
+                "dimension": self.embeddings.dimension,
+                "vocab_size": self.embeddings.vocabulary_size,
+                "is_custom": self.embeddings.is_custom,
+            },
+        }

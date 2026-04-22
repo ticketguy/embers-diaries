@@ -15,6 +15,12 @@ Quick start:
         tags=["test"],
     ))
     record = db.get(record_id)
+
+    # LLM integration:
+    from embers.integration import MemoryProtocol
+    protocol = MemoryProtocol(db)
+    protocol.remember("The user prefers dark mode")
+    context = protocol.recall("What are the user's preferences?")
 """
 
 from .db import EmberDB
@@ -26,7 +32,7 @@ from .core.types import (
     AccessLevel, VerifyStatus, DeprecationReason, EdgeType,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__  = "Sammie — ticketguy"
 
 __all__ = [
