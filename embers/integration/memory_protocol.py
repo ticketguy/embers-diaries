@@ -78,6 +78,10 @@ class MemoryProtocol:
         """
         Store a new memory. Auto-generates embedding and checks for conflicts.
         Returns the record ID.
+
+        The embedding is set on the record before write. The db.write()
+        callback handles all indexing (master, timeline, fulltext, vector,
+        graph) automatically — no manual index calls needed here.
         """
         ns = namespace or self.namespace
 
@@ -98,33 +102,12 @@ class MemoryProtocol:
             written_by=written_by,
         )
 
-        # Generate embedding
-        embedding = self.embeddings.embed_record(record)
-        record.embedding = embedding
+        # Generate embedding — set on record so db.write()'s callback
+        # picks it up and indexes it in the vector store automatically
+        record.embedding = self.embeddings.embed_record(record)
 
-        # Write to store
+        # Write to store — callback handles ALL indexing
         record_id = self.db.write(record)
-
-        # Index in vector store
-        if hasattr(self.db, '_vector_index'):
-            self.db._vector_index.add(record_id, embedding, ns)
-
-        # Index in full-text
-        if hasattr(self.db, '_fulltext_index'):
-            self.db._fulltext_index.add(record_id, record.data, ns,
-                                         extra_text=" ".join(record.tags))
-
-        # Index in timeline
-        if hasattr(self.db, '_timeline_index'):
-            self.db._timeline_index.add(record_id, ns,
-                                         record.created_at.isoformat())
-
-        # Index in master
-        if hasattr(self.db, '_master_index'):
-            self.db._master_index.index_record(
-                record_id, ns, record.record_type.value,
-                record.created_at.isoformat(), record.tags,
-                written_by=written_by)
 
         # Conflict check (lazy — check against recent records in same namespace)
         self._check_conflicts(record)
@@ -140,7 +123,19 @@ class MemoryProtocol:
                format: str = "text") -> str | list[dict]:
         """
         Retrieve relevant memories for a query.
-        
+
+        Retrieval strategy (two-phase):
+          1. Vector similarity via db.similar() — uses the query embedding
+             against the vector index. This is the primary retrieval path
+             when an embedding function is available.
+          2. Full-text BM25 via db.search() — keyword match as a complement.
+             Merged with vector results, deduped by record ID.
+
+        If no embedding function was provided at init, the built-in TF-IDF
+        pipeline generates lightweight embeddings automatically. This means
+        vector search always runs — but for production quality, provide a
+        real embedding function (e.g. sentence-transformers).
+
         Args:
             query: Natural language query
             top_k: Maximum memories to return
@@ -148,46 +143,34 @@ class MemoryProtocol:
             threshold: Minimum similarity threshold
             format: 'text' (for prompt injection), 'messages' (for chat),
                     'structured' (for function calling), 'raw' (EmberRecord list)
-        
+
         Returns formatted context ready for LLM consumption.
         """
         ns = namespace or self.namespace
 
-        # Embed the query
+        # ── Phase 1: Vector similarity search (public API) ────────────────
         query_embedding = self.embeddings.embed_text(query)
+        vector_results = self.db.similar(
+            query_embedding, namespace=ns, top_k=top_k * 2, threshold=threshold)
 
-        # Vector similarity search
         records = []
-        if hasattr(self.db, '_vector_index'):
-            results = self.db._vector_index.similar(
-                query_embedding, ns, top_k * 2, threshold)
-            for rid, score in results:
-                r = self.db.get(rid, include_deprecated=False)
-                if r is not None:
-                    records.append(r)
-        else:
-            # Fallback: full-text search
-            if hasattr(self.db, '_fulltext_index'):
-                results = self.db._fulltext_index.search(query, ns, top_k)
-                for rid, score in results:
-                    r = self.db.get(rid)
-                    if r:
-                        records.append(r)
+        seen_ids = set()
+        for record, score in vector_results:
+            if record.id not in seen_ids:
+                records.append(record)
+                seen_ids.add(record.id)
 
-        # Also do full-text search and merge
-        if hasattr(self.db, '_fulltext_index'):
-            text_results = self.db._fulltext_index.search(query, ns, top_k)
-            seen_ids = {r.id for r in records}
-            for rid, score in text_results:
-                if rid not in seen_ids:
-                    r = self.db.get(rid)
-                    if r:
-                        records.append(r)
+        # ── Phase 2: Full-text BM25 search (public API) — merge in ───────
+        text_results = self.db.search(query, namespace=ns, top_k=top_k)
+        for record, score in text_results:
+            if record.id not in seen_ids:
+                records.append(record)
+                seen_ids.add(record.id)
 
         # Limit
         records = records[:top_k]
 
-        # Track access (via annotation for immutability)
+        # Track access (in-memory only — the immutable record on disk is untouched)
         for r in records:
             r.access_count += 1
             r.last_accessed = datetime.now(timezone.utc)
