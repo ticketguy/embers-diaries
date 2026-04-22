@@ -27,3 +27,5 @@ my_store/
 .coverage
 htmlcov/
 .pytest_cache/
+__pycache__/
+*.egg-info/

@@ -20,6 +20,13 @@ from .core.edge import EdgeRef
 from .storage.store import PhysicalStore
 from .engine.writer import WriteEngine
 from .engine.reader import ReadEngine
+from .index.master import MasterIndex
+from .index.graph import GraphIndex
+from .index.timeline import TimelineIndex
+from .index.vector import VectorIndex
+from .index.fulltext import FullTextIndex
+from .query.engine import QueryEngine
+from .namespace.manager import NamespaceManager
 
 
 class EmberDB:
@@ -27,13 +34,42 @@ class EmberDB:
     Main interface for Ember's Diaries.
     One EmberDB instance = one store (a directory on disk).
     Thread-safe. Multiple agents can write concurrently.
+
+    Integrates:
+    - Physical storage (append-only, WAL-protected)
+    - Index layer (master, graph, timeline, vector, full-text)
+    - Query engine (unified across all indexes)
+    - Namespace manager (logical partitions)
     """
 
     def __init__(self, store_path: str | Path):
-        self._path  = Path(store_path)
-        self._store  = PhysicalStore(self._path)
+        self._path = Path(store_path)
+        self._store = PhysicalStore(self._path)
         self._writer = WriteEngine(self._store)
         self._reader = ReadEngine(self._store, self._writer)
+
+        # Index layer
+        self._master_index = MasterIndex(self._path)
+        self._graph_index = GraphIndex(self._path)
+        self._timeline_index = TimelineIndex(self._path)
+        self._vector_index = VectorIndex(self._path)
+        self._fulltext_index = FullTextIndex(self._path)
+
+        # Query engine
+        self._query_engine = QueryEngine(
+            self._master_index, self._graph_index,
+            self._timeline_index, self._vector_index,
+            self._fulltext_index, self._reader,
+        )
+
+        # Namespace manager
+        self._ns_manager = NamespaceManager(self._path)
+
+        # Register write callbacks to keep indexes updated
+        self._writer.register_callback(self._on_write)
+
+        # Rebuild indexes from existing records if needed
+        self._rebuild_indexes_if_needed()
 
         print(f"🔥 Ember's Diaries connected → {self._path}")
         stats = self._store.stats()
@@ -43,6 +79,49 @@ class EmberDB:
     def connect(cls, store_path: str | Path) -> "EmberDB":
         """Connect to (or create) an Ember's Diaries store."""
         return cls(store_path)
+
+    def _rebuild_indexes_if_needed(self):
+        """On startup, rebuild indexes from store if they're empty."""
+        store_count = self._store.record_count()
+        index_count = self._master_index.record_count()
+        if store_count > 0 and index_count == 0:
+            print(f"   Rebuilding indexes for {store_count} records...")
+            for rid in self._store.all_ids():
+                record = self._store.read(rid)
+                if record:
+                    self._index_record(record)
+
+    def _on_write(self, record: EmberRecord, operation: str):
+        """Callback after every write — keeps indexes in sync."""
+        if operation in ("write", "update"):
+            self._index_record(record)
+
+    def _index_record(self, record: EmberRecord):
+        """Add a record to all relevant indexes."""
+        # Master index
+        self._master_index.index_record(
+            record.id, record.namespace, record.record_type.value,
+            record.created_at.isoformat(), record.tags,
+            written_by=record.written_by)
+
+        # Timeline index
+        self._timeline_index.add(
+            record.id, record.namespace, record.created_at.isoformat())
+
+        # Full-text index
+        self._fulltext_index.add(
+            record.id, record.data, record.namespace,
+            extra_text=" ".join(record.tags))
+
+        # Vector index (if record has embedding)
+        if record.embedding:
+            self._vector_index.add(record.id, record.embedding, record.namespace)
+
+        # Graph index (if record has connections)
+        for edge in record.connections:
+            self._graph_index.add_edge(
+                record.id, edge.target_id,
+                edge.edge_type.value, edge.weight, edge.edge_id)
 
     # ── Write ─────────────────────────────────────────────────────────────────
 
@@ -60,7 +139,9 @@ class EmberDB:
         Old record is preserved (superseded, never deleted).
         Returns (new_id, old_id).
         """
-        return self._writer.update(record_id, new_data, written_by)
+        result = self._writer.update(record_id, new_data, written_by)
+        self._master_index.mark_superseded(record_id, result[0])
+        return result
 
     def annotate(self, record_id: str, annotation: Annotation) -> str:
         """
@@ -77,7 +158,10 @@ class EmberDB:
         Mark a record as deprecated. It remains in the store forever.
         Returns True if successful.
         """
-        return self._writer.deprecate(record_id, reason, note, written_by)
+        result = self._writer.deprecate(record_id, reason, note, written_by)
+        if result:
+            self._master_index.mark_deprecated(record_id)
+        return result
 
     # ── Read ──────────────────────────────────────────────────────────────────
 
@@ -108,114 +192,122 @@ class EmberDB:
     def exists(self, record_id: str) -> bool:
         return self._reader.exists(record_id)
 
-    # ── Query (Phase 3 — stubs that work now via scan) ────────────────────────
+    # ── Query (Index-accelerated) ─────────────────────────────────────────────
 
     def query(self, namespace: str, filters: dict | None = None,
+              tags: list[str] | None = None,
               limit: int = 100,
               include_deprecated: bool = False,
               include_superseded: bool = False) -> list[EmberRecord]:
-        """
-        Document query. Filters by field values.
-        Phase 1: linear scan. Phase 3: index-accelerated.
-        """
-        records = self._reader.get_namespace(
-            namespace, include_deprecated, limit=None
-        )
-        if not filters:
-            return records[:limit]
+        """Document query with index acceleration."""
+        # Backward compat: extract tags from filters if provided there
+        effective_tags = tags
+        effective_filters = dict(filters) if filters else None
+        if effective_filters and "tags" in effective_filters:
+            tag_val = effective_filters.pop("tags")
+            if isinstance(tag_val, str):
+                effective_tags = (effective_tags or []) + [tag_val]
+            elif isinstance(tag_val, list):
+                effective_tags = (effective_tags or []) + tag_val
+            if not effective_filters:
+                effective_filters = None
 
-        results = []
-        for r in records:
-            if self._matches(r, filters):
-                results.append(r)
-                if len(results) >= limit:
-                    break
-        return results
+        return self._query_engine.query(
+            namespace, effective_filters, effective_tags, limit=limit,
+            include_deprecated=include_deprecated,
+            include_superseded=include_superseded)
 
-    def _matches(self, record: EmberRecord, filters: dict) -> bool:
-        """Check if a record matches all filter conditions."""
-        for key, value in filters.items():
-            if key == "tags":
-                if isinstance(value, list):
-                    if not any(t in record.tags for t in value):
-                        return False
-                elif value not in record.tags:
-                    return False
-            elif key == "record_type":
-                if record.record_type.value != value and record.record_type != value:
-                    return False
-            elif key == "written_by":
-                if record.written_by != value:
-                    return False
-            elif key == "confidence_min":
-                if record.confidence < value:
-                    return False
-            elif hasattr(record, key):
-                if getattr(record, key) != value:
-                    return False
-            elif isinstance(record.data, dict):
-                if record.data.get(key) != value:
-                    return False
-            else:
-                return False
-        return True
+    def search(self, query_text: str, namespace: str | None = None,
+               top_k: int = 10) -> list[tuple[EmberRecord, float]]:
+        """Full-text BM25 search."""
+        return self._query_engine.search(query_text, namespace, top_k)
 
-    # ── Graph (Phase 2 stubs) ─────────────────────────────────────────────────
+    def similar(self, embedding: list[float],
+                namespace: str | None = None,
+                top_k: int = 10,
+                threshold: float = 0.0) -> list[tuple[EmberRecord, float]]:
+        """Vector similarity search."""
+        return self._query_engine.similar(
+            embedding, namespace, top_k, threshold)
+
+    # ── Graph ─────────────────────────────────────────────────────────────────
 
     def link(self, from_id: str, to_id: str,
-             edge_ref: EdgeRef | None = None) -> bool:
-        """
-        Link two records with a graph edge.
-        Full graph traversal in Phase 2.
-        """
-        # For now: store as annotations on both records
+             edge_type: str = "relates_to",
+             weight: float = 1.0, label: str = "") -> bool:
+        """Create a graph edge between two records."""
+        if not self.exists(from_id) or not self.exists(to_id):
+            return False
         import uuid
-        from .core.types import EdgeType
-        edge = edge_ref or EdgeRef(
-            edge_id   = str(uuid.uuid4()),
-            target_id = to_id,
-            edge_type = EdgeType.RELATES_TO,
-        )
-        ann = Annotation(
-            content    = f"connected_to:{to_id}",
-            context    = "graph_connection",
-            written_by = "system",
-            tags       = ["graph_edge"],
-        )
-        self.annotate(from_id, ann)
+        self._graph_index.add_edge(
+            from_id, to_id, edge_type, weight,
+            edge_id=str(uuid.uuid4()), label=label)
         return True
 
-    def neighbors(self, record_id: str, depth: int = 1) -> list[EmberRecord]:
-        """Graph traversal. Full implementation in Phase 2."""
-        # Stub: return empty — Phase 2 builds the graph index
-        return []
+    def neighbors(self, record_id: str, depth: int = 1,
+                  edge_type: str | None = None,
+                  direction: str = "outgoing") -> list[EmberRecord]:
+        """Graph traversal — find connected records."""
+        return self._query_engine.neighbors(
+            record_id, depth, edge_type, direction)
+
+    def path(self, from_id: str, to_id: str,
+             max_depth: int = 10) -> list[EmberRecord] | None:
+        """Find shortest path between two records in the graph."""
+        return self._query_engine.path(from_id, to_id, max_depth)
+
+    def subgraph(self, root_id: str, depth: int = 2) -> dict:
+        """Extract a subgraph around a record."""
+        return self._query_engine.subgraph(root_id, depth)
 
     # ── Time ──────────────────────────────────────────────────────────────────
 
     def timeline(self, namespace: str,
                  start: datetime | None = None,
                  end: datetime | None = None) -> list[EmberRecord]:
-        """Records in a namespace ordered by creation time, optionally filtered."""
-        records = self.get_namespace(namespace, include_deprecated=True)
-        if start:
-            records = [r for r in records if r.created_at >= start]
-        if end:
-            records = [r for r in records if r.created_at <= end]
-        return sorted(records, key=lambda r: r.created_at)
+        """Records in a time range via timeline index."""
+        return self._query_engine.timeline(namespace, start, end)
+
+    def latest(self, namespace: str, limit: int = 10) -> list[EmberRecord]:
+        """Most recent N records in a namespace."""
+        return self._query_engine.latest(namespace, limit)
 
     # ── Annotations ───────────────────────────────────────────────────────────
 
     def get_annotations(self, record_id: str) -> list[Annotation]:
         return self._writer.get_annotations(record_id)
 
-    # ── Store info ────────────────────────────────────────────────────────────
+    # ── Namespaces ────────────────────────────────────────────────────────────
 
-    def stats(self) -> dict:
-        return self._store.stats()
+    def create_namespace(self, name: str, description: str = "",
+                         access_level: AccessLevel = AccessLevel.PRIVATE):
+        return self._ns_manager.create(name, description, access_level)
+
+    def list_namespaces(self):
+        return self._ns_manager.list_all()
+
+    # ── Persistence ───────────────────────────────────────────────────────────
 
     def checkpoint(self):
-        """Compact the WAL. Safe to call periodically."""
+        """Persist all indexes and compact the WAL."""
+        self._master_index.persist()
+        self._graph_index.persist()
+        self._timeline_index.persist()
+        self._vector_index.persist()
+        self._fulltext_index.persist()
+        self._ns_manager.persist()
         self._store.checkpoint_wal()
+
+    def stats(self) -> dict:
+        base = self._store.stats()
+        base["indexes"] = {
+            "master": self._master_index.stats(),
+            "graph": self._graph_index.stats(),
+            "timeline": self._timeline_index.stats(),
+            "vector": self._vector_index.stats(),
+            "fulltext": self._fulltext_index.stats(),
+        }
+        return base
 
     def __repr__(self) -> str:
         return f"EmberDB(path={self._path}, records={self._store.record_count()})"
