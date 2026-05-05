@@ -121,5 +121,5 @@ pytest tests/ -v
 
 ---
 
-Built for [Lila](https://github.com/ticketguy/Lila) — a private family ASI assistant.  
-Designed by Sammie (@ticketguy).
+Built for Lila — Harboria Labs.  
+Designed by 0xticketguy — Harboria Labs.
