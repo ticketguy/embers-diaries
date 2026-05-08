@@ -1,0 +1,33 @@
+GNU AFFERO GENERAL PUBLIC LICENSE
+Version 3, 19 November 2007
+
+Copyright (C) 2024-2026 Harboria Labs (0xticketguy)
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+Additional Terms:
+
+Commercial License Available — If you wish to use this software in a
+proprietary product or service without complying with AGPL-3.0 obligations,
+contact Harboria Labs for a commercial license.
+
+The AGPL requires that if you modify this software and make it available
+over a network (e.g., as a cloud service), you must release your complete
+source code under the same license. This protects the community's work
+from being captured by cloud providers without contribution.
+
+For academic research, personal use, and internal company use: the AGPL
+imposes no obligations beyond standard open-source terms. You only need
+to share modifications if you offer the software as a network service
+to third parties.
