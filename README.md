@@ -121,5 +121,4 @@ pytest tests/ -v
 
 ---
 
-Built for Lila — Harboria Labs.  
-Designed by 0xticketguy — Harboria Labs.
+Built by 0xticketguy / Harboria Labs.  

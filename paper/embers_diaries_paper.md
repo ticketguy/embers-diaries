@@ -409,5 +409,5 @@ The past is not a log. It is the database.
 ---
 
 *Code: https://github.com/ticketguy/embers-diaries*
-*License: MIT*
-*Built for Lila — a private family ASI assistant.*
+*License: AGPL-3.0*
+*Built by 0xticketguy / Harboria Labs.*
