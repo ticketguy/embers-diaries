@@ -7,21 +7,20 @@
 
 ---
 
-## What it is
+## Install
 
-Ember's Diaries is an open database engine designed specifically for AI memory systems. It stores anything — structured data, documents, graphs, time-series, embeddings, binary — in a single unified engine that never destroys what it has stored.
+```bash
+pip install git+https://github.com/ticketguy/embers-diaries.git
+```
 
-Where traditional databases are built for operational systems that need *current state*, Ember's Diaries is built for cognitive systems that need *full history*. It treats every write as a permanent record. History is not a log — it is the database.
-
-It is to AI memory what PostgreSQL is to relational data — a reliable, open, general-purpose foundation that you connect to and trust.
+With all optional features:
+```bash
+pip install "git+https://github.com/ticketguy/embers-diaries.git#egg=embers-diaries[all]"
+```
 
 ---
 
-## Quick start
-
-```bash
-pip install embers-diaries
-```
+## Quick Start
 
 ```python
 from embers import EmberDB, EmberRecord, RecordType
@@ -45,7 +44,6 @@ new_id, old_id = db.update(record_id, {"content": "Updated memory"})
 
 # Original still accessible
 original = db.get(old_id, include_superseded=True)
-print(original.data)  # {"content": "First memory", "emotion": "curious"}
 
 # Full history
 history = db.get_history(record_id)
@@ -64,24 +62,116 @@ db.deprecate(record_id)
 
 ---
 
-## Core principles
+## LLM Integration (Memory Protocol)
+
+The high-level interface for connecting language models to Ember:
+
+```python
+from embers import EmberDB
+from embers.integration import MemoryProtocol
+
+db = EmberDB.connect("./agent_memory")
+protocol = MemoryProtocol(db)
+
+# Store memories
+protocol.remember("The user's name is Alex")
+protocol.remember("Alex prefers dark mode", tags=["preference"])
+
+# Recall relevant context
+context = protocol.recall("What do I know about the user?")
+# → formatted text ready for prompt injection
+
+# Cognitive operations
+protocol.reflect()        # Check decay, find conflicts
+protocol.consolidate()    # Merge related memories
+episodes = protocol.segment_episodes()  # Group into episodes
+
+# Verify facts
+protocol.verify(record_id, status="verified", note="Confirmed by user")
+```
+
+---
+
+## REST API
+
+Start the server:
+```bash
+pip install "embers-diaries[api]"
+EMBER_STORE=./my_store uvicorn embers.api:app --port 9200
+```
+
+Endpoints:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Status and stats |
+| POST | `/records` | Write a new record |
+| GET | `/records/{id}` | Get a record |
+| PUT | `/records/{id}` | Update (supersede) |
+| DELETE | `/records/{id}` | Deprecate (never delete) |
+| GET | `/records/{id}/history` | Version history |
+| POST | `/records/{id}/annotate` | Add annotation |
+| GET | `/namespaces` | List namespaces |
+| GET | `/namespaces/{ns}` | Records in namespace |
+| GET | `/search?q=...` | Full-text BM25 search |
+| POST | `/query` | Filtered query |
+| POST | `/graph/link` | Create graph edge |
+| GET | `/graph/neighbors/{id}` | Graph traversal |
+| POST | `/memory/remember` | Store memory (LLM) |
+| POST | `/memory/recall` | Retrieve context (LLM) |
+| POST | `/memory/reflect` | Run reflection cycle |
+| POST | `/memory/consolidate` | Consolidate memories |
+| GET | `/memory/conflicts` | Unresolved conflicts |
+| GET | `/memory/stats` | Memory statistics |
+| GET | `/timeline/{ns}` | Chronological view |
+
+---
+
+## Architecture
+
+```
+┌────────────────────────────────────────────────┐
+│              REST API (FastAPI)                 │  ← Phase 5
+├────────────────────────────────────────────────┤
+│         LLM Integration Layer                  │
+│  MemoryProtocol · ContextBuilder · Embeddings  │
+├────────────────────────────────────────────────┤
+│            Cognitive Layer                      │
+│  Decay · Conflicts · Consolidation · Episodes  │
+│  Reflection · Episodic Segmentation            │
+├────────────────────────────────────────────────┤
+│         Namespace & Access Control             │
+│  Public · Private · Internal · Grant/Revoke    │
+├────────────────────────────────────────────────┤
+│              Query Engine                       │
+│  Document · Graph · Timeline · Vector · BM25   │
+├────────────────────────────────────────────────┤
+│              Index Layer                        │
+│  Master · Graph · Timeline · Vector · FullText │
+├────────────────────────────────────────────────┤
+│         Core Record Engine                     │
+│  Append-only · WAL · Supersession · Immutable  │
+└────────────────────────────────────────────────┘
+```
+
+---
+
+## Core Principles
 
 | Traditional DB | Ember's Diaries |
 |---|---|
 | INSERT → row created | WRITE → record created |
 | UPDATE → row mutated | WRITE → new record, old marked superseded |
-| DELETE → row destroyed | ANNOTATE → original preserved, note added |
-
-**One principle above all:** Nothing is ever deleted. Nothing is ever overwritten. Every state that ever existed is preserved. The past is first-class.
+| DELETE → row destroyed | DEPRECATE → original preserved, marked inactive |
 
 ---
 
-## Record types
+## Record Types
 
 | Type | Use case |
 |---|---|
-| `DOCUMENT` | Structured or semi-structured data objects |
-| `NODE` | Graph vertices — entities, concepts, memories |
+| `DOCUMENT` | Structured or semi-structured data |
+| `NODE` | Graph vertices — entities, concepts |
 | `EDGE` | Graph connections between nodes |
 | `TIMESERIES` | Sequential data indexed by time |
 | `VECTOR` | Embedding records for semantic search |
@@ -89,18 +179,46 @@ db.deprecate(record_id)
 
 ---
 
-## Phase roadmap
+## Cognitive Features
 
-- **Phase 1 (current)** — Core record engine: write, read, supersession, deprecation, annotations, WAL
-- **Phase 2** — Index layer: graph, timeline, vector, full-text indexes
-- **Phase 3** — Query engine: document query, graph traversal, similarity search
-- **Phase 4** — Namespaces and access control
-- **Phase 5** — REST API and Python SDK
-- **Phase 6** — Decentralized protocol
+| Feature | What it does |
+|---|---|
+| **Decay** | Ebbinghaus-curve confidence decay over time |
+| **Consolidation** | Sensory → short-term → long-term memory promotion |
+| **Conflict Detection** | Finds contradictions between memories |
+| **Episodic Segmentation** | Groups memories into conversation episodes |
+| **Reflection** | Meta-cognitive analysis of memory health |
+| **Context Building** | Formats memories for LLM prompt injection |
 
 ---
 
-## Design decisions
+## Status
+
+| Component | Status |
+|-----------|--------|
+| Core record engine (write/read/supersession/WAL) | ✅ Complete |
+| Index layer (graph/timeline/vector/full-text) | ✅ Complete |
+| Query engine (document/graph/similarity/BM25) | ✅ Complete |
+| Namespaces & access control | ✅ Complete |
+| Cognitive layer (decay/conflicts/consolidation) | ✅ Complete |
+| Python SDK (MemoryProtocol/ContextBuilder) | ✅ Complete |
+| REST API (FastAPI server) | ✅ Complete |
+| PyPI package | 🔜 Next |
+
+**114 tests passing.**
+
+---
+
+## Running Tests
+
+```bash
+pip install -e ".[dev]"
+pytest tests/ -v
+```
+
+---
+
+## Design Decisions
 
 | Decision | Choice | Rationale |
 |---|---|---|
@@ -112,13 +230,8 @@ db.deprecate(record_id)
 
 ---
 
-## Running tests
+## License
 
-```bash
-pip install -e ".[dev]"
-pytest tests/ -v
-```
+MIT
 
----
-
-Built by 0xticketguy / Harboria Labs.  
+Built by 0xticketguy / Harboria Labs.

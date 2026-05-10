@@ -1,22 +1,22 @@
-msgpack>=1.0.0
+msgpack<2.0.0,>=1.0.8
 
 [all]
-msgpack>=1.0.0
-numpy>=1.24.0
+msgpack<2.0.0,>=1.0.8
+numpy<3.0.0,>=1.26.0
 whoosh>=2.7.4
-fastapi>=0.100.0
-uvicorn>=0.20.0
+fastapi<1.0.0,>=0.110.0
+uvicorn<1.0.0,>=0.29.0
 
 [api]
-fastapi>=0.100.0
-uvicorn>=0.20.0
+fastapi<1.0.0,>=0.110.0
+uvicorn<1.0.0,>=0.29.0
 
 [dev]
-pytest>=7.0.0
-pytest-cov
+pytest<9.0.0,>=7.4.0
+pytest-cov>=4.1.0
 
 [fulltext]
 whoosh>=2.7.4
 
 [vector]
-numpy>=1.24.0
+numpy<3.0.0,>=1.26.0
